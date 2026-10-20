@@ -15,6 +15,7 @@ return (args.Length > 0 ? args[0] : "") switch
     "double-dispose" => DoubleDispose(),
     "finalizer-race" => FinalizerRace(),
     "race-loop" => RaceLoop(seconds: args.Length > 1 ? int.Parse(args[1]) : 30),
+    "owner-finalizer" => OwnerFinalizer(),
     _ => Usage(),
 };
 
@@ -126,9 +127,57 @@ static int RaceLoop(int seconds)
     return 0;
 }
 
+// A game class that owns a Variant field and disposes it from its finalizer path, the way a GodotObject subclass
+// overriding Dispose(bool) does when it disposes fields without checking `disposing`. Both objects become
+// unreachable together; .NET runs their finalizers in no guaranteed order.
+static int OwnerFinalizer()
+{
+    for (var round = 0; round < 200; round++)
+    {
+        MakeOwners(1000);
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+    }
+
+    Console.WriteLine($"no crash: {Owner.DisposedField} owner finalizers ran, {Owner.CaughtInOwner} caught the exception themselves");
+    return 0;
+}
+
+[MethodImpl(MethodImplOptions.NoInlining)]
+static void MakeOwners(int count)
+{
+    for (var i = 0; i < count; i++)
+        _ = new Owner(Variant.CreateHeapValue("owned"));
+}
+
 [MethodImpl(MethodImplOptions.NoInlining)]
 static (WeakReference<IDisposable> Weak, int Id) CreateAndDrop()
 {
     var variant = Variant.CreateHeapValue("test");
     return (new WeakReference<IDisposable>(variant.DisposerForRepro!, trackResurrection: true), variant.NativeVar.Id);
+}
+
+sealed class Owner(Variant field)
+{
+    public static int DisposedField;
+    private Variant _field = field;
+
+    // REPRO_OWNER_CATCH=1: swallow the owner-side exception, to see whether the other finalization order
+    // (owner first, Disposer second) can also fail - that is the stack in the report.
+    private static readonly bool Catch = Environment.GetEnvironmentVariable("REPRO_OWNER_CATCH") == "1";
+    public static int CaughtInOwner;
+
+    ~Owner()
+    {
+        try
+        {
+            _field.Dispose();
+        }
+        catch (ArgumentException) when (Catch)
+        {
+            Interlocked.Increment(ref CaughtInOwner);
+        }
+
+        Interlocked.Increment(ref DisposedField);
+    }
 }

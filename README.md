@@ -11,6 +11,51 @@ System.ArgumentException: Disposable not registered. (Parameter 'weakReference')
   at GC.RunFinalizers()
 ```
 
+## Real Godot 4.7.2 (official .NET build), ordinary game code
+
+`godot-project/` is a normal Godot 4.7 C# project. It doesn't copy or touch Godot internals and doesn't force GC
+timing; collections happen from everyday allocations. Run headless:
+
+```bash
+cd godot-project && dotnet build
+Godot --headless --path . --import
+Godot --headless --path . -- <scenario> [seconds]
+```
+
+Results on macOS arm64, Godot v4.7.2.stable.mono.official.ed1daf0bf, .NET 10.0.0:
+
+| Scenario | Result |
+|---|---|
+| `inventory`: a `RefCounted` subclass disposes its `Variant` fields in a `Dispose(bool)` override without checking `disposing`; objects are dropped | **abort, exit 134, every run** |
+| `inventory-careful`: same, but only disposes when `disposing == true` | no crash (1.4M objects, 20 s) |
+| `plain-fields`: `Variant` fields from dictionary lookups, metadata and `Call()`; never disposed | no crash (1.4M objects) |
+| `threads`: 4 workers parse JSON into `Variant`s and `CallDeferred` them to the main thread | no crash (974k `Variant`s, 62k GCs) |
+| `quit`: quit with 30k live `Variant`s and pending garbage (plain objects only) | no crash, 5/5 runs |
+
+Stack in real Godot (`inventory`):
+
+```
+System.ArgumentException: Disposable not registered. (Parameter 'weakReference')
+   at Godot.DisposablesTracker.UnregisterDisposable(...)  DisposablesTracker.cs:line 91
+   at Godot.Variant.Disposer.Dispose(Boolean disposing)  Variant.cs:line 47
+   at Godot.Variant.Disposer.Dispose()                    Variant.cs:line 37
+   at Godot.Variant.Dispose()                             Variant.cs:line 103
+   at ItemData.Dispose(Boolean disposing)                 InventoryScenario.cs:line 23
+   at Godot.GodotObject.Finalize()                        GodotObject.base.cs:line 100
+   at System.GC.RunFinalizers()
+```
+
+Same exception and the same Godot lines as the report, but the second dispose comes from the owner's finalizer,
+not from `Disposer`'s own finalizer as in the report. .NET finalizes the `Disposer` first, then the owner disposes it
+again. The reporter's exact frame order has not been reproduced in real Godot.
+
+Note: `GodotObject.Dispose(bool)` already guards against running twice (`if (_disposed) return;`);
+`Variant.Disposer` does not (nor, at a glance, `Array`, `Dictionary`, `StringName`, `NodePath`).
+
+## Standalone harness (copied Godot types)
+
+The rest of this README is about `src/`, a plain .NET harness used first to understand the mechanism.
+
 ## What the code shows
 
 `src/GodotCopy.cs` is a faithful copy of `DisposablesTracker` and the `Variant.Disposer` from master (identical in

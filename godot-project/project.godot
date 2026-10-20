@@ -1,0 +1,10 @@
+; Godot 4.7 project for godotengine/godot#123707: ordinary game code that handles Variants, run headless.
+config_version=5
+
+[application]
+config/name="Repro123707"
+run/main_scene="res://Main.tscn"
+config/features=PackedStringArray("4.7", "C#")
+
+[dotnet]
+project/assembly_name="Repro123707"
