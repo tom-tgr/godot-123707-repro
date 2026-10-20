@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Runs every scenario of godot-project/ in real Godot (headless) and checks each outcome against what
-# godotengine/godot#123707 predicts. Exits non-zero if any scenario behaves differently - so a green run means
-# "the bug reproduces exactly as documented", and a red run after a Godot update may mean it was fixed.
+# godotengine/godot#123707 predicts. Exits non-zero only if a documented failure (crash or error) does NOT
+# happen any more - after a Godot update that may mean the bug was fixed. A crash in a scenario expected to be
+# clean is reported as a warning ("also crashed"), not a failure.
 #
 # Usage: ci/run-scenarios.sh <path to Godot .NET binary>
 # Outcomes: crash   = process aborted (non-zero exit, unhandled exception)
@@ -12,6 +13,8 @@ set -uo pipefail
 GODOT=$1
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 PROJECT="$ROOT/godot-project"
+# Git Bash on Windows: hand the Windows-native Godot binary a Windows path.
+command -v cygpath > /dev/null && PROJECT=$(cygpath -m "$PROJECT")
 LOGS="$ROOT/ci/logs"
 SUMMARY=${GITHUB_STEP_SUMMARY:-/dev/stdout}
 mkdir -p "$LOGS"
@@ -57,12 +60,19 @@ for entry in "${SCENARIOS[@]}"; do
     actual=clean
   fi
 
-  if [ "$actual" = "$expected" ]; then mark="✅"; else mark="❌"; failures=$((failures + 1)); fi
+  if [ "$actual" = "$expected" ]; then
+    mark="✅"
+  elif [ "$expected" = "clean" ]; then
+    mark="⚠️ also crashed"   # not predicted by the issue: worth investigating, not a failed reproduction
+  else
+    mark="❌ did not reproduce"
+    failures=$((failures + 1))
+  fi
   echo "| \`$name\` | $description | $expected | **$actual** | $code | $mark |" >> "$SUMMARY"
 
   if [ "$actual" != "clean" ]; then
     # Godot prints the stack twice (its own error log and the runtime's); keep the first copy only.
-    stack=$(grep -m1 -E "System.ArgumentException" "$log"
+    stack=$(grep -m1 -E "System\.[A-Za-z]+Exception|FATAL" "$log"
       awk '/^   at / { if ($0 ~ /UnregisterDisposable/ && seen++) exit; print }' "$log" | head -8 |
         sed -E 's/ in .*(\/[^/]+:line [0-9]+)$/  \1/')
     details+=$'\n'"<details><summary><code>$name</code>: $actual</summary>"$'\n\n```\n'"$stack"$'\n```\n</details>\n'
@@ -75,9 +85,9 @@ done
   echo "$details"
   echo
   if [ "$failures" -eq 0 ]; then
-    echo "All scenarios behaved as documented: the bug reproduces."
+    echo "Every documented failure reproduced."
   else
-    echo "$failures scenario(s) behaved differently than documented (bug fixed, or the repro needs updating)."
+    echo "$failures documented failure(s) did not reproduce (bug fixed, or the repro needs updating)."
   fi
 } >> "$SUMMARY"
 

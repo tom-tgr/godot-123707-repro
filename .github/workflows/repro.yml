@@ -1,5 +1,5 @@
 # Reproduces godotengine/godot#123707 ("Disposable not registered" -> SIGABRT) with the official Godot .NET build
-# and ordinary game code. Green = every scenario behaves as documented in ci/run-scenarios.sh.
+# and ordinary game code, on Linux, macOS and Windows. See ci/run-scenarios.sh for the scenarios and expectations.
 name: repro-123707
 
 on:
@@ -8,35 +8,53 @@ on:
 
 jobs:
   repro:
+    name: ${{ matrix.os }} / .NET ${{ matrix.dotnet }}
     strategy:
       fail-fast: false
       matrix:
         include:
+          # .NET 9 everywhere: the reporter's runtime.
           - os: ubuntu-24.04
+            dotnet: "9.0"
             godot_zip: Godot_v4.7.2-stable_mono_linux_x86_64.zip
             godot_bin: Godot_v4.7.2-stable_mono_linux_x86_64/Godot_v4.7.2-stable_mono_linux.x86_64
           - os: macos-14 # Apple Silicon, like the reporter
+            dotnet: "9.0"
             godot_zip: Godot_v4.7.2-stable_mono_macos.universal.zip
             godot_bin: Godot_mono.app/Contents/MacOS/Godot
+          - os: windows-2022
+            dotnet: "9.0"
+            godot_zip: Godot_v4.7.2-stable_mono_win64.zip
+            godot_bin: Godot_v4.7.2-stable_mono_win64/Godot_v4.7.2-stable_mono_win64_console.exe
+          # .NET 10 on Linux: where the first CI run found crashes without any Dispose call in game code.
+          - os: ubuntu-24.04
+            dotnet: "10.0"
+            godot_zip: Godot_v4.7.2-stable_mono_linux_x86_64.zip
+            godot_bin: Godot_v4.7.2-stable_mono_linux_x86_64/Godot_v4.7.2-stable_mono_linux.x86_64
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: "9.0.x" # the reporter's .NET version
+          dotnet-version: "${{ matrix.dotnet }}.x"
 
       - name: Download official Godot 4.7.2 .NET
         run: |
           curl -sfL --retry 3 -o godot.zip "https://github.com/godotengine/godot/releases/download/4.7.2-stable/${{ matrix.godot_zip }}"
-          unzip -q godot.zip -d godot-bin
+          if command -v unzip > /dev/null; then unzip -q godot.zip -d godot-bin; else 7z x -y -ogodot-bin godot.zip > /dev/null; fi
           echo "GODOT=$PWD/godot-bin/${{ matrix.godot_bin }}" >> "$GITHUB_ENV"
 
       - name: Build the game's C# and import the project
         working-directory: godot-project
         run: |
-          dotnet build -p:GodotTfm=net9.0
+          # RollForward=LatestMinor keeps the game on the .NET major version it targets
+          # (Godot's SDK otherwise lets it move up to the newest installed runtime).
+          dotnet build -p:GodotTfm=net${{ matrix.dotnet }} -p:RollForward=LatestMinor
           "$GODOT" --headless --path . --import
 
       - name: Run scenarios
@@ -45,5 +63,5 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: logs-${{ matrix.os }}
+          name: logs-${{ matrix.os }}-net${{ matrix.dotnet }}
           path: ci/logs/
