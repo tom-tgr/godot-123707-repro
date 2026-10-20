@@ -35,7 +35,7 @@ SCENARIOS=(
 {
   echo "### godotengine/godot#123707 in real Godot"
   echo
-  echo "- $("$GODOT" --version 2>/dev/null | tail -1), $(uname -sm), .NET $(dotnet --version)"
+  echo "- Godot $("$GODOT" --version 2>/dev/null | tail -1), $(uname -sm), .NET SDK $(dotnet --version)"
   echo
   echo "| Scenario | What the game code does | Expected | Actual | Exit | |"
   echo "|---|---|---|---|---:|---|"
@@ -80,7 +80,10 @@ for entry in "${SCENARIOS[@]}"; do
   echo "$name: expected=$expected actual=$actual exit=$code $mark"
 done
 
+runtime=$(grep -ohE "dotnet=[0-9.]+" "$LOGS"/*.log | sort -u | tr '\n' ' ')
 {
+  echo
+  echo "Runtime the game actually ran on (from the game's own log): \`${runtime:-unknown}\`"
   echo
   echo "$details"
   echo
