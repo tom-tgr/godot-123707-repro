@@ -2,3 +2,4 @@ build/
 bin/
 obj/
 godot-project/.godot/
+ci/logs/
