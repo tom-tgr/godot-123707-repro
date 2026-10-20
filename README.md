@@ -33,6 +33,17 @@ Results on macOS arm64, Godot v4.7.2.stable.mono.official.ed1daf0bf, .NET 10.0.0
 | `quit`: quit with 30k live `Variant`s and pending garbage (plain objects only) | no crash, 5/5 runs |
 | `native-held`: `RefCounted` objects with `Variant` fields, kept alive only by the engine (Godot `Array`, node metadata, a signal) and released a frame later; exercises the weak/strong GC handle swap | no crash, 3 × 30 s (~1.2M objects each)* |
 
+| `snippet-main`: the reporter's steps to reproduce, verbatim, inside a Godot callback | Godot logs `ERROR: ... Disposable not registered`, game keeps running (exit 0) |
+| `snippet-task`: the same snippet on a `Task.Run` worker | **nothing logged at all**: the exception is swallowed by the task, the native value is still freed twice |
+| `snippet-thread`: the same snippet on a plain `Thread` | **abort, exit 134** |
+
+`native-held` never disposes a `Variant`, so it could not hit the double dispose by construction. It only shows that
+the engine's weak/strong handle swap alone does not trigger the crash.
+
+Godot's own C# glue never disposes a managed `Godot.Variant`: its `using var` blocks dispose native `godot_variant`
+values (`VariantUtils.CreateFrom`, `ConvertToVariant`). So the first dispose in the reporter's game came from game or
+library code.
+
 \* The "3 ObjectDB instances leaked" warning is the test's own helper nodes, which it never frees.
 
 Stack in real Godot (`inventory`):
