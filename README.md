@@ -1,7 +1,7 @@
 # Repro for godotengine/godot#123707
 
-[godotengine/godot#123707](https://github.com/godotengine/godot/issues/123707): a released Godot 4.7.x .NET game aborts
-(SIGABRT) with
+[godotengine/godot#123707](https://github.com/godotengine/godot/issues/123707): a released Godot 4.7.x .NET game
+crashes (SIGABRT) with:
 
 ```
 System.ArgumentException: Disposable not registered. (Parameter 'weakReference')
@@ -11,69 +11,44 @@ System.ArgumentException: Disposable not registered. (Parameter 'weakReference')
   at GC.RunFinalizers()
 ```
 
-## GitHub Actions: Linux, macOS and Windows
+This repo reproduces it with the **official Godot 4.7.2 .NET build** and ordinary game code. It doesn't copy or
+change any Godot code, and it doesn't force garbage collection.
 
-`.github/workflows/repro.yml` downloads the official Godot 4.7.2 .NET build, builds `godot-project/` and runs every
-scenario headless through `ci/run-scenarios.sh`. Jobs: Linux, macOS (Apple Silicon) and Windows on .NET 9.0.21 (the
-reporter's major version), plus Linux on .NET 10.0.13. The runtime is verified from each game's own log.
+## The problem in short
 
-The job passes when every documented failure reproduces. A crash in a scenario expected to be clean is shown as
-"⚠️ also crashed" with its stack.
+`Variant.Disposer.Dispose()` is not safe to call twice. The second call frees the native value again and then throws
+"Disposable not registered". On the finalizer thread or a normal `Thread`, nobody can catch that exception, so the
+game crashes.
 
-Runtime pinning: when a project runs from the Godot editor binary, Godot starts .NET through its bundled
-`GodotPlugins.runtimeconfig.json` (`rollForward: LatestMajor`), so it uses the newest runtime it can find, not the
-project's. The workflow therefore gives the game a folder containing only the wanted runtime, via `DOTNET_ROOT`.
+`GodotObject.Dispose(bool)` already protects against this with `if (_disposed) return;`. `Variant.Disposer` does not.
+`Godot.Collections.Dictionary` has the same problem, and probably `Array`, `StringName` and `NodePath` too.
 
-Results across runs (2026-10-20):
+## What is in the repo
 
-- **Documented failures reproduce on every OS and runtime.**
-  - `inventory` and `snippet-thread` crash. Exit 134 on Linux and macOS; 127 on Windows (Git Bash's report of the abort).
-  - `snippet-main` logs the error.
-- **Intermittent crashes with no `Dispose` call in game code** (scenarios expected to be clean):
-  - `Godot.Collections.Dictionary.Finalize -> Dispose(false) -> UnregisterDisposable` throws "Disposable not
-    registered". That is the reporter's exact frame order, in `Dictionary` instead of `Variant.Disposer`. Seen in
-    `threads` on Linux and on macOS (both runs on the .NET 10 runtime, before pinning worked).
-  - On Linux only, a separate shutdown crash after the scenario finished:
-    `FATAL: Condition "handle.value && GDMono::get_singleton() == nullptr" is true. at: release (modules/mono/mono_gc_handle.cpp:38)`
-    followed by many "Leaked unsafe reference to object". Seen 4 times, in `plain-fields`, `native-held`, `quit` and
-    `inventory-careful`, on .NET 9 and 10.
+- `godot-project/`: a normal Godot 4.7 C# project. `Main.cs` runs one scenario for N seconds and quits.
+- `ci/run-scenarios.sh`: runs every scenario, compares each result with the expected one, writes a summary table.
+- `.github/workflows/repro.yml`: downloads official Godot and runs everything on Linux, macOS and Windows.
 
-## Real Godot 4.7.2 (official .NET build), ordinary game code
+## Scenarios
 
-`godot-project/` is a normal Godot 4.7 C# project. It doesn't copy or touch Godot internals and doesn't force GC
-timing; collections happen from everyday allocations. Run headless:
+| Scenario | What the game code does | Expected |
+|---|---|---|
+| `inventory` | A `RefCounted` class disposes its `Variant` fields in `Dispose(bool)` without checking `disposing`. Objects are dropped and left to the finalizer. | **crash** |
+| `inventory-careful` | Same, but only disposes when `disposing == true` | no crash |
+| `plain-fields` | `Variant` fields from dictionary lookups, metadata and `Call()`, never disposed | no crash |
+| `threads` | 4 worker threads parse JSON into `Variant`s and send them to the main thread with `CallDeferred`. No `Dispose` anywhere. | no crash (but see below) |
+| `quit` | Quit while 30k `Variant`s are alive | no crash |
+| `native-held` | Objects with `Variant` fields kept alive only by the engine (Godot `Array`, metadata, a signal). No `Dispose` calls. | no crash |
+| `snippet-main` | The reporter's snippet (dispose two copies of one `Variant`) on the main thread | **error in the log**, game keeps running |
+| `snippet-task` | The same snippet inside `Task.Run` | nothing logged (the task swallows the exception), but the native value is still freed twice |
+| `snippet-thread` | The same snippet on a normal `Thread` | **crash** |
 
-```bash
-cd godot-project && dotnet build
-Godot --headless --path . --import
-Godot --headless --path . -- <scenario> [seconds]
-```
+## Results
 
-Results on macOS arm64, Godot v4.7.2.stable.mono.official.ed1daf0bf, .NET 10.0.0:
+On Linux, macOS (Apple Silicon) and Windows, with .NET 9.0.21 and 10.0.13, every expected crash and error
+reproduces. Exit code 134 on Linux and macOS; Windows reports the same crash as 127.
 
-| Scenario | Result |
-|---|---|
-| `inventory`: a `RefCounted` subclass disposes its `Variant` fields in a `Dispose(bool)` override without checking `disposing`; objects are dropped | **abort, exit 134, every run** |
-| `inventory-careful`: same, but only disposes when `disposing == true` | no crash (1.4M objects, 20 s) |
-| `plain-fields`: `Variant` fields from dictionary lookups, metadata and `Call()`; never disposed | no crash (1.4M objects) |
-| `threads`: 4 workers parse JSON into `Variant`s and `CallDeferred` them to the main thread | no crash (974k `Variant`s, 62k GCs) |
-| `quit`: quit with 30k live `Variant`s and pending garbage (plain objects only) | no crash, 5/5 runs |
-| `native-held`: `RefCounted` objects with `Variant` fields, kept alive only by the engine (Godot `Array`, node metadata, a signal) and released a frame later; exercises the weak/strong GC handle swap | no crash, 3 × 30 s (~1.2M objects each)* |
-
-| `snippet-main`: the reporter's steps to reproduce, verbatim, inside a Godot callback | Godot logs `ERROR: ... Disposable not registered`, game keeps running (exit 0) |
-| `snippet-task`: the same snippet on a `Task.Run` worker | **nothing logged at all**: the exception is swallowed by the task, the native value is still freed twice |
-| `snippet-thread`: the same snippet on a plain `Thread` | **abort, exit 134** |
-
-`native-held` never disposes a `Variant`, so it could not hit the double dispose by construction. It only shows that
-the engine's weak/strong handle swap alone does not trigger the crash.
-
-Godot's own C# glue never disposes a managed `Godot.Variant`: its `using var` blocks dispose native `godot_variant`
-values (`VariantUtils.CreateFrom`, `ConvertToVariant`). So the first dispose in the reporter's game came from game or
-library code.
-
-\* The "3 ObjectDB instances leaked" warning is the test's own helper nodes, which it never frees.
-
-Stack in real Godot (`inventory`):
+Stack from `inventory`:
 
 ```
 System.ArgumentException: Disposable not registered. (Parameter 'weakReference')
@@ -86,48 +61,46 @@ System.ArgumentException: Disposable not registered. (Parameter 'weakReference')
    at System.GC.RunFinalizers()
 ```
 
-Same exception and the same Godot lines as the report, but the second dispose comes from the owner's finalizer,
-not from `Disposer`'s own finalizer as in the report. .NET finalizes the `Disposer` first, then the owner disposes it
-again. The reporter's exact frame order has not been reproduced in real Godot. The engine-held scenario, the remaining
-engine path that could hand a dying object back to the main thread, did not crash. Still open as a lead:
-[godotengine/godot#124587](https://github.com/godotengine/godot/issues/124587).
+### Crashes without any Dispose in game code
 
-Note: `GodotObject.Dispose(bool)` already guards against running twice (`if (_disposed) return;`);
-`Variant.Disposer` does not (nor, at a glance, `Array`, `Dictionary`, `StringName`, `NodePath`).
+Sometimes `threads` also crashes, even though the game code never calls `Dispose`. The stack has the same shape as in
+the issue, but comes from `Dictionary`:
 
-## Standalone harness (copied Godot types)
-
-The rest of this README is about `src/`, a plain .NET harness used first to understand the mechanism.
-
-## What the code shows
-
-`src/GodotCopy.cs` is a faithful copy of `DisposablesTracker` and the `Variant.Disposer` from master (identical in
-4.7.2-stable; verbatim excerpts in `upstream-*.cs.txt`). Only the native `godot_variant` is replaced by a fake that
-counts frees.
-
-- `Disposer.Dispose(bool)` is not idempotent. A second run throws `Disposable not registered` and also frees the
-  native variant a second time (a double free in the engine).
-- `UnregisterDisposable` is the only code that removes the entry, and an explicit `Dispose()` calls
-  `GC.SuppressFinalize`. So the reported stack needs two threads inside `Dispose(bool)` on the same `Disposer` at
-  once: the finalizer thread already running `~Disposer`, and another thread disposing it after it became
-  unreachable. An unhandled exception on the finalizer thread terminates the process.
-
-## Reproduction (macOS arm64, .NET 10; the reporter used .NET 9)
-
-```bash
-dotnet build src -c Release -o build
-dotnet build/repro.dll double-dispose   # reporter's snippet: catchable exception, native freed twice
-dotnet build/repro.dll finalizer-race   # staged: exact reported stack, exit 134 (SIGABRT)
-dotnet build/repro.dll race-loop 30     # unstaged GC loop: same crash within the first batch, exit 134
+```
+System.ArgumentException: Disposable not registered. (Parameter 'weakReference')
+   at Godot.DisposablesTracker.UnregisterDisposable(...)        DisposablesTracker.cs:line 91
+   at Godot.Collections.Dictionary.Dispose(Boolean disposing)  Dictionary.cs:line 71
+   at Godot.Collections.Dictionary.Finalize()                   Dictionary.cs:line 52
+   at System.GC.RunFinalizers()
 ```
 
-`finalizer-race` pauses the finalizer inside the native free, disposes the same `Disposer` from the main thread, then
-lets the finalizer continue. `race-loop` has no pauses, only a ~microsecond native free, and crashed within the first
-batch on every run.
+Seen twice so far, once on Linux and once on macOS. What disposes the `Dictionary` the first time is not known yet.
+Godot's own C# code only disposes native `godot_variant` values, not managed `Variant`s, so it is not an obvious
+`Dispose()` call in the engine.
 
-## Not established yet
+### A different crash at shutdown (Linux only)
 
-The harness reaches a dying `Disposer` through a long weak reference (`trackResurrection: true`). That stands in for
-whatever lets engine code reach a `Variant` copy after its `Disposer` became unreachable (for example a native GC
-handle). The real trigger in the reporter's game is unknown; their own snippet only shows the non-idempotent dispose.
-The crash site, exception and abort match the report.
+On Linux, a scenario sometimes finishes normally and then Godot crashes while quitting:
+
+```
+FATAL: Condition "handle.value && GDMono::get_singleton() == nullptr" is true.
+   at: release (modules/mono/mono_gc_handle.cpp:38)
+Leaked unsafe reference to object: <RefCounted#...>   (many times)
+```
+
+Seen 4 times, in 4 different scenarios, on .NET 9 and 10. This looks like a separate bug.
+
+## Run it yourself
+
+```bash
+cd godot-project
+dotnet build
+Godot --headless --path . --import
+Godot --headless --path . -- inventory 15        # or any scenario from the table
+../ci/run-scenarios.sh /path/to/Godot           # all scenarios with a summary
+```
+
+Note about .NET versions: when a project runs from the Godot editor binary, Godot starts .NET through its own
+`GodotPlugins.runtimeconfig.json` (`rollForward: LatestMajor`). So it uses the newest .NET it can find, not the one
+the project targets. The workflow gives Godot a folder with only the wanted runtime (via `DOTNET_ROOT`) and checks
+the version in each game's log.
