@@ -39,13 +39,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Godot's editor binary starts .NET through its own GodotPlugins.runtimeconfig.json (rollForward:
-      # LatestMajor), i.e. the newest runtime it can see. Installing the wanted SDK into a private folder makes
-      # setup-dotnet point DOTNET_ROOT there, and Godot resolves .NET from DOTNET_ROOT first - so this job's
-      # runtime is the only one Godot finds. (runner.temp is only available inside steps.)
-      - name: Private .NET install folder
-        run: echo "DOTNET_INSTALL_DIR=${{ runner.temp }}/dotnet-${{ matrix.dotnet }}" >> "$GITHUB_ENV"
-
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "${{ matrix.dotnet }}.x"
@@ -56,15 +49,34 @@ jobs:
           if command -v unzip > /dev/null; then unzip -q godot.zip -d godot-bin; else 7z x -y -ogodot-bin godot.zip > /dev/null; fi
           echo "GODOT=$PWD/godot-bin/${{ matrix.godot_bin }}" >> "$GITHUB_ENV"
 
+      # Godot's editor binary starts .NET through its own GodotPlugins.runtimeconfig.json (rollForward:
+      # LatestMajor): it uses the newest runtime it can see, and setup-dotnet installs a .NET 10 runtime too.
+      # So the game gets a folder holding ONLY the wanted runtime, and Godot is pointed at it via DOTNET_ROOT
+      # (Godot's hostfxr resolver checks DOTNET_ROOT before PATH and the default install locations).
+      - name: Runtime-only .NET folder for the game
+        run: |
+          RT="$RUNNER_TEMP/game-dotnet-${{ matrix.dotnet }}"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            pwsh -NoProfile -Command "Invoke-WebRequest https://dot.net/v1/dotnet-install.ps1 -OutFile \"$RUNNER_TEMP/dotnet-install.ps1\"; & \"$RUNNER_TEMP/dotnet-install.ps1\" -Runtime dotnet -Channel ${{ matrix.dotnet }} -InstallDir \"$RT\""
+          else
+            curl -sSL https://dot.net/v1/dotnet-install.sh -o "$RUNNER_TEMP/dotnet-install.sh"
+            bash "$RUNNER_TEMP/dotnet-install.sh" --runtime dotnet --channel ${{ matrix.dotnet }} --install-dir "$RT"
+          fi
+          echo "Runtimes Godot will see:"; ls "$RT/shared/Microsoft.NETCore.App"
+          echo "GAME_DOTNET_ROOT=$RT" >> "$GITHUB_ENV"
+
       - name: Build the game's C# and import the project
         working-directory: godot-project
         run: |
-          echo "DOTNET_ROOT=$DOTNET_ROOT"; dotnet --list-runtimes
           dotnet build -p:GodotTfm=net${{ matrix.dotnet }}
           "$GODOT" --headless --path . --import
 
       - name: Run scenarios
-        run: ci/run-scenarios.sh "$GODOT"
+        env:
+          DOTNET_ROOT: ${{ env.GAME_DOTNET_ROOT }}
+        run: |
+          unset DOTNET_ROOT_X64 DOTNET_ROOT_ARM64 # these would take precedence over DOTNET_ROOT
+          ci/run-scenarios.sh "$GODOT"
 
       - uses: actions/upload-artifact@v4
         if: always()
