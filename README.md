@@ -31,6 +31,9 @@ Results on macOS arm64, Godot v4.7.2.stable.mono.official.ed1daf0bf, .NET 10.0.0
 | `plain-fields`: `Variant` fields from dictionary lookups, metadata and `Call()`; never disposed | no crash (1.4M objects) |
 | `threads`: 4 workers parse JSON into `Variant`s and `CallDeferred` them to the main thread | no crash (974k `Variant`s, 62k GCs) |
 | `quit`: quit with 30k live `Variant`s and pending garbage (plain objects only) | no crash, 5/5 runs |
+| `native-held`: `RefCounted` objects with `Variant` fields, kept alive only by the engine (Godot `Array`, node metadata, a signal) and released a frame later; exercises the weak/strong GC handle swap | no crash, 3 × 30 s (~1.2M objects each)* |
+
+\* The "3 ObjectDB instances leaked" warning is the test's own helper nodes, which it never frees.
 
 Stack in real Godot (`inventory`):
 
@@ -47,7 +50,9 @@ System.ArgumentException: Disposable not registered. (Parameter 'weakReference')
 
 Same exception and the same Godot lines as the report, but the second dispose comes from the owner's finalizer,
 not from `Disposer`'s own finalizer as in the report. .NET finalizes the `Disposer` first, then the owner disposes it
-again. The reporter's exact frame order has not been reproduced in real Godot.
+again. The reporter's exact frame order has not been reproduced in real Godot. The engine-held scenario, the remaining
+engine path that could hand a dying object back to the main thread, did not crash. Still open as a lead:
+[godotengine/godot#124587](https://github.com/godotengine/godot/issues/124587).
 
 Note: `GodotObject.Dispose(bool)` already guards against running twice (`if (_disposed) return;`);
 `Variant.Disposer` does not (nor, at a glance, `Array`, `Dictionary`, `StringName`, `NodePath`).

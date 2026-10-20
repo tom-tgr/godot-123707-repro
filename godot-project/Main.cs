@@ -3,7 +3,7 @@ using Godot;
 // Runs one scenario for N seconds of real frames, then quits. Nothing here touches Godot internals or forces GC
 // timing: garbage collections happen from ordinary allocation pressure, like in a game.
 //   Godot --headless --path godot-project -- <scenario> [seconds]
-// Scenarios: inventory | inventory-careful | plain-fields | threads | quit
+// Scenarios: inventory | inventory-careful | plain-fields | threads | quit | native-held
 public partial class Main : Node
 {
     private IScenario _scenario = null!;
@@ -24,6 +24,7 @@ public partial class Main : Node
             "plain-fields" => new PlainFieldsScenario(),
             "threads" => new ThreadsScenario(this),
             "quit" => new QuitScenario(),
+            "native-held" => new NativeHeldScenario(),
             _ => throw new System.ArgumentException($"unknown scenario '{name}'"),
         };
         _gen0AtStart = System.GC.CollectionCount(0);
