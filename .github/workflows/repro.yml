@@ -5,6 +5,7 @@ name: repro-123707
 on:
   workflow_dispatch:
   push:
+    paths-ignore: ["**.md"]
 
 jobs:
   repro:
