@@ -1,7 +1,9 @@
 <Project Sdk="Godot.NET.Sdk/4.7.2">
-  <!-- The reporter used .NET 9; this machine only has .NET 10. -->
+  <!-- The reporter used .NET 9. CI builds with -p:GodotTfm=net9.0; locally this machine only has .NET 10.
+       (Overriding TargetFramework itself on the command line breaks restore: NETSDK1005.) -->
   <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
+    <GodotTfm Condition="'$(GodotTfm)' == ''">net10.0</GodotTfm>
+    <TargetFramework>$(GodotTfm)</TargetFramework>
     <EnableDynamicLoading>true</EnableDynamicLoading>
     <Nullable>enable</Nullable>
   </PropertyGroup>

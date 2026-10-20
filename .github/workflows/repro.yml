@@ -36,7 +36,7 @@ jobs:
       - name: Build the game's C# and import the project
         working-directory: godot-project
         run: |
-          dotnet build -p:TargetFramework=net9.0
+          dotnet build -p:GodotTfm=net9.0
           "$GODOT" --headless --path . --import
 
       - name: Run scenarios
